@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"text/tabwriter"
 	"time"
 
 	blocks "github.com/ipfs/go-ipfs/blocks/blockstore"
@@ -18,7 +17,7 @@ import (
 )
 
 type objectInfo struct {
-	Hash      string
+	Cid       *cid.Cid
 	Type      string
 	TotalSize uint64
 	Pinned    bool
@@ -131,7 +130,7 @@ func main() {
 		}
 
 		oi := objectInfo{
-			Hash:      c.String(),
+			Cid:       c,
 			Pinned:    recpins.Has(c),
 			TotalSize: size,
 		}
@@ -149,11 +148,36 @@ func main() {
 	fmt.Printf("%s: classification complete, sorting output...\n", time.Now())
 	sort.Sort(objectInfos(output))
 
-	w := tabwriter.NewWriter(os.Stdout, 8, 4, 4, ' ', 0)
-	fmt.Fprintf(w, "Hash\tType\tSize\tPinned(recursively)\n")
-	for _, oi := range output {
-		fmt.Fprintf(w, "%s\t%s\t%d\t%t\n", oi.Hash, oi.Type, oi.TotalSize, oi.Pinned)
-	}
+	outputObjectInfos(dag, output)
+}
 
-	w.Flush()
+func outputObjectInfos(dag merkledag.DAGService, ois []objectInfo) {
+	fmt.Println("Hash                  Type\tSize\tPinned(recursively)")
+	for _, oi := range ois {
+		fmt.Printf("%s %s\t%d\t%t\n", oi.Cid, oi.Type, oi.TotalSize, oi.Pinned)
+		if oi.Type == "unixfs-Directory" {
+			nd, err := dag.Get(context.Background(), oi.Cid)
+			if err != nil {
+				fmt.Println("Error fetching node: ", err)
+				continue
+			}
+
+			nshow := 5
+			if len(nd.Links) < 5 {
+				nshow = len(nd.Links)
+			}
+
+			fmt.Print("\tDirents: [ ")
+			for _, lnk := range nd.Links[:nshow] {
+				fmt.Printf("%q ", lnk.Name)
+			}
+
+			fmt.Print("]")
+
+			if len(nd.Links) > 5 {
+				fmt.Print(" ...")
+			}
+			fmt.Println()
+		}
+	}
 }
