@@ -115,7 +115,7 @@ func printObjectInfos(bs blocks.Blockstore, dag merkledag.DAGService, pinner pin
 	fmt.Printf("%s: started processing keys...\n", time.Now())
 	allKeys := cid.NewSet()
 	for bk := range keys {
-		allKeys.Add(bk)
+		allKeys.Add(cid.NewCidV0(bk.ToMultihash()))
 	}
 
 	fmt.Printf("%s: initial key gathering complete, now finding graph roots.\n", time.Now())
@@ -236,7 +236,7 @@ func findMaybeLostPins(blks blocks.Blockstore, dag merkledag.DAGService, pinner 
 
 	missing := cid.NewSet()
 	for c := range kchan {
-		err := processObject(dag, c, seen, pins, missing)
+		err := processObject(dag, cid.NewCidV0(c.ToMultihash()), seen, pins, missing)
 		if err != nil {
 			return nil, err
 		}
