@@ -43,7 +43,13 @@ This mode can be used to get an idea of what sort of content is in your repo.
 Prebuilt binaries are available at TODO
 
 ### From Source
-TODO
+Clone it down anywhere and run `make`.
+
+```
+$ git clone https://github.com/whyrusleeping/ipfs-see-all
+$ cd ipfs-see-all
+$ make
+```
 
 ### License
 MIT
