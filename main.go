@@ -13,6 +13,7 @@ import (
 	"github.com/ipfs/go-ipfs/pin"
 	"github.com/ipfs/go-ipfs/repo/fsrepo"
 	ft "github.com/ipfs/go-ipfs/unixfs"
+	proto "gx/ipfs/QmZ4Qi3GaRbjcx28Sme5eMH7RQjGkt8wHxt2a65oLaeFEV/gogo-protobuf/proto"
 	cid "gx/ipfs/QmakyCk6Vnn16WEKjbkxieZmM2YLTzkFWizbmGowoYPjro/go-cid"
 )
 
@@ -63,6 +64,11 @@ func fatal(i interface{}) {
 }
 
 func main() {
+	if len(os.Args) == 1 || (os.Args[1] != "lost-pins" && os.Args[1] != "content-stat") {
+		fmt.Printf("usage: %s [ lost-pins | content-stat ]\n", os.Args[0])
+		return
+	}
+
 	p, err := fsrepo.BestKnownPath()
 	if err != nil {
 		fatal(err)
@@ -70,18 +76,33 @@ func main() {
 
 	r, err := fsrepo.Open(p)
 	if err != nil {
+		fmt.Println("Have you turned your daemon off?")
 		fatal(err)
 	}
 
 	bs := blocks.NewBlockstore(r.Datastore())
-	keys, err := bs.AllKeysChan(context.Background())
+	dag := merkledag.NewDAGService(bserv.New(bs, nil))
+	pinner, err := pin.LoadPinner(r.Datastore(), dag, dag)
 	if err != nil {
 		fatal(err)
 	}
 
-	dag := merkledag.NewDAGService(bserv.New(bs, nil))
+	if os.Args[1] == "lost-pins" {
+		maybelost, err := findMaybeLostPins(bs, dag, pinner)
+		if err != nil {
+			fatal(err)
+		}
 
-	pinner, err := pin.LoadPinner(r.Datastore(), dag, dag)
+		for _, c := range maybelost {
+			fmt.Println(c)
+		}
+	} else {
+		printObjectInfos(bs, dag, pinner)
+	}
+}
+
+func printObjectInfos(bs blocks.Blockstore, dag merkledag.DAGService, pinner pin.Pinner) {
+	keys, err := bs.AllKeysChan(context.Background())
 	if err != nil {
 		fatal(err)
 	}
@@ -94,8 +115,7 @@ func main() {
 	fmt.Printf("%s: started processing keys...\n", time.Now())
 	allKeys := cid.NewSet()
 	for bk := range keys {
-		c := cid.NewCidV0(bk.ToMultihash())
-		allKeys.Add(c)
+		allKeys.Add(bk)
 	}
 
 	fmt.Printf("%s: initial key gathering complete, now finding graph roots.\n", time.Now())
@@ -133,16 +153,31 @@ func main() {
 			Cid:       c,
 			Pinned:    recpins.Has(c),
 			TotalSize: size,
+			Type:      "unknown",
 		}
 
 		fsn, err := ft.FSNodeFromBytes(nd.Data())
 		if err == nil {
 			oi.Type = "unixfs-" + fsn.Type.String()
-		} else {
-			oi.Type = "unknown"
+			output = append(output, oi)
+			continue
 		}
 
-		output = append(output, oi)
+		var pinhdr Set
+		err = proto.Unmarshal(nd.Data(), &pinhdr)
+		if err != nil {
+			output = append(output, oi)
+			continue
+		}
+
+		if pinhdr.GetVersion() != 1 {
+			fmt.Println("found an object that looks like a pin header, but wasnt")
+			output = append(output, oi)
+			continue
+		}
+
+		// Potentially found lost pins!
+
 	}
 
 	fmt.Printf("%s: classification complete, sorting output...\n", time.Now())
@@ -180,4 +215,82 @@ func outputObjectInfos(dag merkledag.DAGService, ois []objectInfo) {
 			fmt.Println()
 		}
 	}
+}
+
+func findMaybeLostPins(blks blocks.Blockstore, dag merkledag.DAGService, pinner pin.Pinner) ([]*cid.Cid, error) {
+	pins := cid.NewSet()
+	for _, reck := range pinner.RecursiveKeys() {
+		pins.Add(reck)
+	}
+
+	for _, dirk := range pinner.DirectKeys() {
+		pins.Add(dirk)
+	}
+
+	seen := cid.NewSet()
+
+	kchan, err := blks.AllKeysChan(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	missing := cid.NewSet()
+	for c := range kchan {
+		err := processObject(dag, c, seen, pins, missing)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return missing.Keys(), nil
+}
+
+func processObject(dag merkledag.DAGService, c *cid.Cid, seen, pinned, missing *cid.Set) error {
+	if seen.Has(c) {
+		return nil
+	}
+	seen.Add(c)
+	nd, err := dag.Get(context.Background(), c)
+	if err != nil {
+		//fmt.Fprintln(os.Stderr, "dag.Get() error: ", err)
+		return nil
+	}
+
+	var pset Set
+	err = proto.Unmarshal(nd.Data(), &pset)
+	if err != nil {
+		// not a pinset, move on
+		return nil
+	}
+
+	// might be a pinset! investigate!
+	if pset.GetVersion() != 1 {
+		return nil
+	}
+
+	// Woohoo! this looks like a pinset!
+	fout := int(pset.GetFanout())
+	if len(nd.Links) > fout {
+		//Are these pins???
+		for _, lnk := range nd.Links[fout:] {
+			c := cid.NewCidV0(lnk.Hash)
+			if !pinned.Has(c) {
+				missing.Add(c)
+			}
+		}
+	}
+
+	if len(nd.Links) < fout {
+		fout = len(nd.Links)
+	}
+
+	for _, lnk := range nd.Links[:fout] {
+		c := cid.NewCidV0(lnk.Hash)
+		err := processObject(dag, c, seen, pinned, missing)
+		if err != nil {
+			return err
+		}
+		seen.Add(c)
+	}
+	return nil
 }
